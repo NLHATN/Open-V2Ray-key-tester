@@ -395,6 +395,7 @@ class V2RayTester:
     
     def __init__(self):
         self.test_timeout = 10
+        self.stop_testing = False
         
     def test_key(self, key: V2RayKey, test_type: str = 'latency') -> Dict:
         """
@@ -494,18 +495,37 @@ class V2RayTester:
     
     def get_ip_info(self, key: V2RayKey) -> Optional[Dict]:
         """Получает информацию об IP адресе"""
-        try:
-            # В реальной реализации здесь должен быть запрос через V2Ray прокси
-            # Для демонстрации используем прямой запрос
-            response = requests.get('https://ipapi.co/json/', timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                return {
-                    'ip': data.get('ip'),
-                    'country': data.get('country_name')
-                }
-        except:
-            pass
+        # Список сервисов для определения IP и страны
+        services = [
+            'https://ipapi.co/json/',
+            'http://ip-api.com/json/',
+            'https://api.ipify.org?format=json',
+        ]
+        
+        for service in services:
+            try:
+                response = requests.get(service, timeout=5)
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # Разные сервисы возвращают данные в разных форматах
+                    if 'country_name' in data:  # ipapi.co
+                        return {
+                            'ip': data.get('ip'),
+                            'country': data.get('country_name')
+                        }
+                    elif 'country' in data:  # ip-api.com
+                        return {
+                            'ip': data.get('query', data.get('ip')),
+                            'country': data.get('country')
+                        }
+                    else:  # ipify (только IP)
+                        return {
+                            'ip': data.get('ip'),
+                            'country': None
+                        }
+            except:
+                continue
         
         return None
     
@@ -589,7 +609,7 @@ class V2RayTesterGUI:
     
     def __init__(self, root):
         self.root = root
-        self.root.title("V2Ray Key Tester Pro - Advanced Edition")
+        self.root.title("Open V2Ray Key Tester - by @nlhatn")
         self.root.geometry("1400x800")
         
         # Данные
@@ -598,6 +618,10 @@ class V2RayTesterGUI:
         self.subscription_manager = SubscriptionManager()
         self.monitoring_active = False
         self.monitor_interval = 3600
+        self.testing_thread = None
+        
+        # Логирование
+        self.log_messages = []
         
         # Фильтры
         self.current_filter = {
@@ -632,8 +656,10 @@ class V2RayTesterGUI:
         menubar.add_cascade(label="Правка", menu=edit_menu)
         edit_menu.add_command(label="Копировать выбранные", command=self.copy_selected, accelerator="Ctrl+C")
         edit_menu.add_command(label="Удалить выбранные", command=self.delete_selected, accelerator="Del")
+        edit_menu.add_separator()
         edit_menu.add_command(label="Удалить дубликаты", command=self.remove_duplicates)
         edit_menu.add_command(label="Удалить нерабочие", command=self.remove_dead_servers)
+        edit_menu.add_command(label="Удалить худшие", command=self.remove_worst_keys)
         edit_menu.add_separator()
         edit_menu.add_command(label="Выбрать все", command=self.select_all, accelerator="Ctrl+A")
         
@@ -653,8 +679,15 @@ class V2RayTesterGUI:
         
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Помощь", menu=help_menu)
-        help_menu.add_command(label="О программе", command=self.show_about)
+        help_menu.add_command(label="О проекте", command=self.show_about)
         help_menu.add_command(label="Горячие клавиши", command=self.show_hotkeys)
+        help_menu.add_separator()
+        help_menu.add_command(label="Telegram автора", command=lambda: self.open_link("https://t.me/Nlhatn"))
+        help_menu.add_command(label="GitHub проекта", command=lambda: self.open_link("https://github.com/NLHATN/Open-V2Ray-Checker"))
+        help_menu.add_command(label="Telegram канал проекта", command=lambda: self.open_link("https://t.me/Open_v2ray_key_tester"))
+        help_menu.add_command(label="Telegram канал с ключами", command=lambda: self.open_link("https://t.me/V2ray_key"))
+        help_menu.add_separator()
+        help_menu.add_command(label="Поддержать проект", command=self.show_support)
         
         # Верхняя панель с кнопками
         toolbar = ttk.Frame(self.root)
@@ -666,7 +699,10 @@ class V2RayTesterGUI:
         
         ttk.Button(btn_frame, text="➕ Добавить", command=self.add_from_clipboard).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="📁 Загрузить", command=self.load_from_file).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="🔄 Тест всех", command=self.test_all_keys).pack(side=tk.LEFT, padx=2)
+        self.test_btn = ttk.Button(btn_frame, text="🔄 Тест всех", command=self.test_all_keys)
+        self.test_btn.pack(side=tk.LEFT, padx=2)
+        self.stop_btn = ttk.Button(btn_frame, text="⏹️ Стоп", command=self.stop_testing, state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="📊 Подписки", command=self.show_subscription_manager).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="🎯 QR коды", command=self.show_qr_generator).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="🗑️ Очистить", command=self.clear_keys).pack(side=tk.LEFT, padx=2)
@@ -723,6 +759,9 @@ class V2RayTesterGUI:
         
         # Вкладка "Графики"
         self.setup_charts_tab()
+        
+        # Вкладка "Логи"
+        self.setup_logs_tab()
         
         # Статус бар
         status_frame = ttk.Frame(self.root)
@@ -787,6 +826,7 @@ class V2RayTesterGUI:
         self.context_menu.add_command(label="Тест сервера", command=self.test_selected)
         self.context_menu.add_command(label="Копировать ключ", command=self.copy_selected)
         self.context_menu.add_separator()
+        self.context_menu.add_command(label="Полная статистика", command=self.show_full_stats)
         self.context_menu.add_command(label="Добавить в избранное", command=self.toggle_favorite)
         self.context_menu.add_command(label="Редактировать", command=self.edit_selected)
         self.context_menu.add_separator()
@@ -816,7 +856,7 @@ class V2RayTesterGUI:
         best_frame = ttk.Frame(self.notebook)
         self.notebook.add(best_frame, text="⭐ Лучшие ключи")
         
-        self.best_text = scrolledtext.ScrolledText(best_frame, height=25, width=100, font=('Courier', 10))
+        self.best_text = scrolledtext.ScrolledText(best_frame, height=20, width=100, font=('Courier', 10))
         self.best_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         btn_frame = ttk.Frame(best_frame)
@@ -824,6 +864,8 @@ class V2RayTesterGUI:
         
         ttk.Button(btn_frame, text="🔄 Обновить рейтинг", command=self.update_best_keys).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="🎯 Автовыбор лучшего", command=self.auto_select_best).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="📋 Копировать ТОП-5 быстрых", command=lambda: self.copy_best_keys('fastest')).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="📋 Копировать ТОП-5 стабильных", command=lambda: self.copy_best_keys('stable')).pack(side=tk.LEFT, padx=2)
     
     def setup_charts_tab(self):
         """Настройка вкладки с графиками"""
@@ -835,6 +877,22 @@ class V2RayTesterGUI:
         info_label.pack(pady=20)
         
         ttk.Button(charts_frame, text="🔄 Обновить графики", command=self.update_charts).pack(pady=10)
+    
+    def setup_logs_tab(self):
+        """Настройка вкладки с логами"""
+        logs_frame = ttk.Frame(self.notebook)
+        self.notebook.add(logs_frame, text="📋 Логи")
+        
+        self.logs_text = scrolledtext.ScrolledText(logs_frame, height=25, width=100, font=('Courier', 9))
+        self.logs_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        btn_frame = ttk.Frame(logs_frame)
+        btn_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Button(btn_frame, text="🗑️ Очистить логи", command=self.clear_logs).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="💾 Сохранить логи", command=self.save_logs).pack(side=tk.LEFT, padx=2)
+        
+        self.add_log("Программа запущена")
     
     def add_from_clipboard(self):
         """Добавляет ключи из буфера обмена"""
@@ -879,8 +937,10 @@ class V2RayTesterGUI:
                     if not any(k.id == key.id for k in self.keys):
                         self.keys.append(key)
                         added += 1
+                        self.add_log(f"Добавлен: {key.name} ({key.get_protocol_display()})")
                 except Exception as e:
                     errors.append(f"Ошибка парсинга: {line[:50]}... - {str(e)}")
+                    self.add_log(f"Ошибка парсинга ключа: {str(e)}")
         
         self.update_keys_display()
         self.update_group_filter()
@@ -892,6 +952,7 @@ class V2RayTesterGUI:
             if len(errors) <= 5:
                 msg += "\n" + "\n".join(errors)
         
+        self.add_log(f"Импорт завершен: добавлено {added}, ошибок {len(errors)}")
         messagebox.showinfo("Импорт завершен", msg)
     
     def test_all_keys(self):
@@ -920,21 +981,41 @@ class V2RayTesterGUI:
     def test_keys_batch(self, keys_to_test: List[V2RayKey]):
         """Пакетное тестирование ключей"""
         self.status_var.set("Тестирование ключей...")
+        self.tester.stop_testing = False
+        self.stop_btn.config(state=tk.NORMAL)
+        self.test_btn.config(state=tk.DISABLED)
+        self.add_log(f"Начато тестирование {len(keys_to_test)} ключей")
         
         def test_thread():
             total = len(keys_to_test)
-            for i, key in enumerate(keys_to_test):
-                self.root.after(0, lambda i=i, t=total: self.status_var.set(f"Тестирование {i+1}/{t}: {key.name[:30]}..."))
-                result = self.tester.test_key(key, 'latency')
-                self.root.after(0, self.update_keys_display)
-                time.sleep(0.1)  # Небольшая задержка между тестами
+            tested = 0
             
-            self.root.after(0, lambda: self.status_var.set(f"Тестирование завершено. Протестировано: {total}"))
+            for i, key in enumerate(keys_to_test):
+                if self.tester.stop_testing:
+                    self.root.after(0, lambda: self.add_log(f"Тестирование прервано. Протестировано: {tested}/{total}"))
+                    break
+                
+                self.root.after(0, lambda i=i, t=total, n=key.name[:30]: self.status_var.set(f"Тестирование {i+1}/{t}: {n}..."))
+                result = self.tester.test_key(key, 'full')
+                tested += 1
+                
+                if result['success']:
+                    self.root.after(0, lambda n=key.name: self.add_log(f"✓ {n} - OK ({key.get_average_latency():.0f}ms)"))
+                else:
+                    self.root.after(0, lambda n=key.name, e=result.get('error', 'Unknown'): self.add_log(f"✗ {n} - FAIL ({e})"))
+                
+                self.root.after(0, self.update_keys_display)
+                time.sleep(0.1)
+            
+            self.root.after(0, lambda: self.status_var.set(f"Тестирование завершено. Протестировано: {tested}/{total}"))
+            self.root.after(0, lambda: self.add_log(f"Тестирование завершено. Протестировано: {tested}/{total}"))
             self.root.after(0, self.update_statistics)
             self.root.after(0, self.update_best_keys)
+            self.root.after(0, lambda: self.stop_btn.config(state=tk.DISABLED))
+            self.root.after(0, lambda: self.test_btn.config(state=tk.NORMAL))
         
-        thread = threading.Thread(target=test_thread, daemon=True)
-        thread.start()
+        self.testing_thread = threading.Thread(target=test_thread, daemon=True)
+        self.testing_thread.start()
     
     def update_keys_display(self):
         """Обновляет отображение ключей в таблице"""
@@ -1801,26 +1882,33 @@ class V2RayTesterGUI:
                 print(f"Ошибка загрузки конфигурации: {e}")
     
     def show_about(self):
-        """Показывает информацию о программе"""
+        """Показывает информацию о проекте"""
         about_text = """
-V2Ray Key Tester Pro - Advanced Edition
+Open V2Ray Key Tester
 Версия 2.0
 
+Создатель: @nlhatn
+Проект: Open Source
+
 Полнофункциональный тестер V2Ray ключей с поддержкой:
-• VMess, VLESS, VLESS+Reality, Trojan
-• Shadowsocks, SS2022
-• Hysteria2, TUIC, SSH
+- VMess, VLESS, VLESS+Reality, Trojan
+- Shadowsocks, SS2022
+- Hysteria2, TUIC, SSH
 
 Возможности:
-✓ Тестирование и мониторинг
-✓ Подписки (subscriptions)
-✓ QR коды
-✓ Фильтрация и группировка
-✓ Детальная статистика
+- Тестирование и мониторинг
+- Подписки (subscriptions)
+- QR коды
+- Фильтрация и группировка
+- Детальная статистика
 
-© 2024 V2Ray Tester Pro Team
+Этот проект является открытым и бесплатным.
+Распространяется свободно для всех пользователей.
+
+GitHub: github.com/NLHATN/Open-V2Ray-Checker
+Telegram: @Open_v2ray_key_tester
 """
-        messagebox.showinfo("О программе", about_text)
+        messagebox.showinfo("О проекте", about_text)
     
     def show_hotkeys(self):
         """Показывает горячие клавиши"""
@@ -1838,6 +1926,238 @@ Delete       Удалить выбранные
 Правая кнопка   Контекстное меню
 """
         messagebox.showinfo("Горячие клавиши", hotkeys_text)
+    
+    def add_log(self, message: str):
+        """Добавляет сообщение в лог"""
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        log_entry = f"[{timestamp}] {message}"
+        self.log_messages.append(log_entry)
+        
+        if hasattr(self, 'logs_text'):
+            self.logs_text.insert(tk.END, log_entry + '\n')
+            self.logs_text.see(tk.END)
+    
+    def clear_logs(self):
+        """Очищает логи"""
+        self.log_messages.clear()
+        self.logs_text.delete(1.0, tk.END)
+        self.add_log("Логи очищены")
+    
+    def save_logs(self):
+        """Сохраняет логи в файл"""
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            initialfile=f"logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                with open(filename, 'w', encoding='utf-8') as f:
+                    f.write(self.logs_text.get(1.0, tk.END))
+                messagebox.showinfo("Готово", f"Логи сохранены: {filename}")
+                self.add_log(f"Логи сохранены в файл: {filename}")
+            except Exception as e:
+                messagebox.showerror("Ошибка", f"Ошибка сохранения: {e}")
+    
+    def remove_worst_keys(self):
+        """Удаляет худшие ключи на основе комплексной оценки"""
+        if not any(k.total_tests > 0 for k in self.keys):
+            messagebox.showwarning("Внимание", "Сначала протестируйте серверы")
+            return
+        
+        # Худшие ключи - это те, которые:
+        # 1. Не работают (успешность 0%)
+        # 2. Очень медленные (задержка > 500ms) И низкая успешность (< 50%)
+        # 3. Нестабильные (успешность < 30%)
+        
+        worst_keys = []
+        for key in self.keys:
+            if key.total_tests == 0:
+                continue
+            
+            avg_latency = key.get_average_latency()
+            success_rate = key.get_success_rate()
+            
+            # Критерии для худших ключей
+            is_dead = not key.uptime_start and key.total_tests > 0
+            is_very_slow = avg_latency and avg_latency > 500 and success_rate < 50
+            is_unstable = success_rate < 30
+            
+            if is_dead or is_very_slow or is_unstable:
+                worst_keys.append(key)
+        
+        if not worst_keys:
+            messagebox.showinfo("Информация", "Худшие ключи не найдены")
+            return
+        
+        # Показываем детали перед удалением
+        details = f"Найдено худших ключей: {len(worst_keys)}\n\n"
+        details += "Критерии:\n"
+        details += "- Не работают (0% успешности)\n"
+        details += "- Очень медленные (>500ms) с низкой успешностью (<50%)\n"
+        details += "- Нестабильные (<30% успешности)\n\n"
+        details += f"Удалить {len(worst_keys)} ключей?"
+        
+        if messagebox.askyesno("Удаление худших ключей", details):
+            for key in worst_keys:
+                self.keys.remove(key)
+            
+            self.update_keys_display()
+            self.add_log(f"Удалено худших ключей: {len(worst_keys)}")
+            messagebox.showinfo("Готово", f"Удалено худших ключей: {len(worst_keys)}")
+    
+    def stop_testing(self):
+        """Останавливает текущее тестирование"""
+        self.tester.stop_testing = True
+        self.add_log("Тестирование остановлено пользователем")
+        self.status_var.set("Тестирование остановлено")
+        self.stop_btn.config(state=tk.DISABLED)
+        self.test_btn.config(state=tk.NORMAL)
+    
+    def open_link(self, url: str):
+        """Открывает ссылку в браузере"""
+        import webbrowser
+        webbrowser.open(url)
+        self.add_log(f"Открыта ссылка: {url}")
+    
+    def show_full_stats(self):
+        """Показывает полную статистику для выбранного ключа"""
+        selected_items = self.tree.selection()
+        if not selected_items or len(selected_items) > 1:
+            messagebox.showwarning("Внимание", "Выберите один ключ")
+            return
+        
+        index = int(self.tree.item(selected_items[0], 'text')) - 1
+        if 0 <= index < len(self.keys):
+            key = self.keys[index]
+            
+            stats_window = tk.Toplevel(self.root)
+            stats_window.title(f"Полная статистика: {key.name}")
+            stats_window.geometry("700x600")
+            
+            stats = f"""
+═══════════════════════════════════════════════════════════════
+                    ПОЛНАЯ СТАТИСТИКА СЕРВЕРА
+═══════════════════════════════════════════════════════════════
+
+ОСНОВНАЯ ИНФОРМАЦИЯ:
+  Название: {key.name}
+  Протокол: {key.get_protocol_display()}
+  Сервер: {key.config.get('add', 'N/A')}
+  Порт: {key.config.get('port', 'N/A')}
+  Группа: {key.group}
+  Избранное: {'Да' if key.is_favorite else 'Нет'}
+
+ГЕОГРАФИЯ:
+  Страна: {key.country or 'Не определена'}
+  IP адрес: {key.ip_address or 'Не определен'}
+
+СТАТИСТИКА ТЕСТИРОВАНИЯ:
+  Всего тестов: {key.total_tests}
+  Успешных: {key.successful_tests}
+  Неудачных: {key.total_tests - key.successful_tests}
+  Процент успешности: {key.get_success_rate():.1f}%
+
+ПРОИЗВОДИТЕЛЬНОСТЬ:
+  Средняя задержка: {key.get_average_latency():.2f} ms
+  Минимальная задержка: {min(key.latency_history) if key.latency_history else 'N/A'}
+  Максимальная задержка: {max(key.latency_history) if key.latency_history else 'N/A'}
+  Всего измерений: {len(key.latency_history)}
+
+ИСТОРИЯ ЗАДЕРЖКИ (последние 10):
+"""
+            if key.latency_history:
+                for i, lat in enumerate(key.latency_history[-10:], 1):
+                    stats += f"  {i}. {lat:.2f} ms\n"
+            else:
+                stats += "  Нет данных\n"
+            
+            stats += f"""
+ВРЕМЯ РАБОТЫ:
+  Uptime: {key.get_uptime_minutes()} минут ({key.get_uptime_minutes()/60:.2f} часов)
+  Начало работы: {datetime.fromtimestamp(key.uptime_start).strftime('%Y-%m-%d %H:%M:%S') if key.uptime_start else 'Не запущен'}
+  Последний тест: {key.last_test_time.strftime('%Y-%m-%d %H:%M:%S') if key.last_test_time else 'Не тестировался'}
+
+СКОРОСТЬ (если доступно):
+  Загрузка: {key.download_speed or 'Не тестировалась'}
+  Выгрузка: {key.upload_speed or 'Не тестировалась'}
+
+ЗАМЕТКИ:
+  {key.notes or 'Нет заметок'}
+
+═══════════════════════════════════════════════════════════════
+"""
+            
+            text = scrolledtext.ScrolledText(stats_window, font=('Courier', 9))
+            text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+            text.insert(1.0, stats)
+            text.config(state=tk.DISABLED)
+            
+            btn_frame = ttk.Frame(stats_window)
+            btn_frame.pack(fill=tk.X, padx=10, pady=5)
+            
+            ttk.Button(btn_frame, text="Копировать ключ", 
+                      command=lambda: self.copy_key_to_clipboard(key)).pack(side=tk.LEFT, padx=2)
+            ttk.Button(btn_frame, text="Закрыть", 
+                      command=stats_window.destroy).pack(side=tk.RIGHT, padx=2)
+    
+    def copy_best_keys(self, category: str):
+        """Копирует лучшие ключи определенной категории"""
+        if not self.keys:
+            messagebox.showwarning("Внимание", "Список ключей пуст")
+            return
+        
+        if category == 'fastest':
+            # Самые быстрые
+            working_keys = [k for k in self.keys if k.get_average_latency()]
+            working_keys.sort(key=lambda k: k.get_average_latency())
+            selected_keys = working_keys[:5]
+            category_name = "быстрых"
+        elif category == 'stable':
+            # Самые стабильные
+            stable_keys = [k for k in self.keys if k.total_tests >= 3]
+            stable_keys.sort(key=lambda k: (k.get_success_rate(), -k.get_average_latency() if k.get_average_latency() else 999), reverse=True)
+            selected_keys = stable_keys[:5]
+            category_name = "стабильных"
+        else:
+            return
+        
+        if not selected_keys:
+            messagebox.showwarning("Внимание", f"Нет данных для категории '{category_name}'")
+            return
+        
+        keys_text = [k.to_share_link() for k in selected_keys]
+        self.root.clipboard_clear()
+        self.root.clipboard_append('\n'.join(keys_text))
+        
+        self.add_log(f"Скопировано ТОП-5 {category_name} ключей")
+        self.status_var.set(f"Скопировано ТОП-5 {category_name} ключей")
+        messagebox.showinfo("Готово", f"Скопировано {len(keys_text)} {category_name} ключей в буфер обмена")
+    
+    def show_support(self):
+        """Показывает информацию о поддержке проекта"""
+        support_text = """
+Поддержать проект Open V2Ray Key Tester
+
+Этот проект разрабатывается бесплатно и является открытым.
+Если вы хотите поддержать разработку, вы можете:
+
+1. Поставить звезду на GitHub
+   github.com/NLHATN/Open-V2Ray-Checker
+
+2. Поделиться проектом с друзьями
+
+3. Подписаться на Telegram канал
+   @Open_v2ray_key_tester
+
+4. Сообщить об ошибках или предложить улучшения
+
+Спасибо за использование!
+
+Автор: @nlhatn
+"""
+        messagebox.showinfo("Поддержать проект", support_text)
 
 
 def main():

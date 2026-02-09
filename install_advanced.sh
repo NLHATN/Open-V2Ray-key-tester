@@ -1,8 +1,8 @@
 #!/bin/bash
 
 echo "╔═══════════════════════════════════════════════════════════╗"
-echo "║   V2Ray Key Tester Pro - Advanced Edition v2.0           ║"
-echo "║                  Установка                                ║"
+echo "║        Open V2Ray Key Tester - Installation              ║"
+echo "║                 Created by @nlhatn                        ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -133,8 +133,8 @@ if [[ $create_desktop == "y" || $create_desktop == "Y" ]]; then
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=V2Ray Tester Pro
-Comment=Продвинутый тестер V2Ray ключей
+Name=Open V2Ray Key Tester
+Comment=Advanced V2Ray key testing tool
 Exec=python3 $CURRENT_DIR/$MAIN_FILE
 Icon=network-workgroup
 Terminal=false
